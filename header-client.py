@@ -6,13 +6,13 @@ from selectors import EVENT_WRITE as WRITE
 from socket import AF_INET, SOCK_STREAM
 from socket import socket as Socket
 
-from handler_lib import ClientMessage
+from handler_lib import ClientHandler
 
 def parse_args() -> Namespace:
     parser = ArgumentParser()
     parser.add_argument('--host', default='localhost')
     parser.add_argument('--port', type=int, default=8000)
-    parser.add_argument('--action', default='GET')
+    parser.add_argument('--action', default='GET ')
     parser.add_argument('--value', default='/')
     return parser.parse_args()
 
@@ -25,7 +25,7 @@ def main(host: str, port: int, action: str, value: str) -> None:
     log.info(f"Starting connection to {host}:{port}")
     actions = READ | WRITE
     request = create_request(action, value)
-    data = ClientMessage(selector, socket, (host, port), request)
+    data = ClientHandler(selector, socket, (host, port), request)
     selector.register(socket, actions, data)
     try:
         while selector.get_map():

@@ -1,23 +1,40 @@
-import sys
-import selectors
-from socket import socket as Socket
-import json
 import io
+import json
+import selectors
 import struct
+import sys
+from socket import socket as Socket
 
 
 class MessageHandler:
-    def __init__(self, selector, socket, addr) -> None:
-        self.selector: selectors.BaseSelector = selector
+    def __init__(self, socket, addr) -> None:
         self.socket: Socket = socket
         self.addr: tuple = addr
-        self._in_buffer: bytes = b""
         self._out_buffer: bytes = b""
+        self.finished_writing: bool = True
+        self._in_buffer: bytes = b""
         self._json_header_len: int = None
         self.json_header: dict = None
+        self.content: bytes = None
 
-    def _write(self):
-        if self._out_buffer:
+    def create_message(self, content_bytes, content_type, content_encoding):
+        json_header = {
+            "byteorder": sys.byteorder,
+            "content-type": content_type,
+            "content-encoding": content_encoding,
+            "content-length": len(content_bytes),
+        }
+        json_header_bytes = self._json_encode(json_header, "utf-8")
+        message_header = struct.pack(">H", len(json_header_bytes))
+        message = message_header + json_header_bytes + content_bytes
+        self._out_buffer += message
+        self.finished_writing = False
+
+    def _json_encode(self, obj, encoding):
+        return json.dumps(obj, ensure_ascii=False).encode(encoding)
+
+    def write(self):
+        if not self.finished_writing:
             print(f"Sending {self._out_buffer!r} to {self.addr}")
             try:
                 sent = self.socket.send(self._out_buffer)
@@ -25,20 +42,10 @@ class MessageHandler:
             except BlockingIOError:
                 # Resource temporarily unavailable (errno EWOULDBLOCK)
                 pass
+            if not self._out_buffer:
+                self.finished_writing = True
 
-    def _set_selector_events_mask(self, mode):
-        """Set selector to listen for events: mode is 'r', 'w', or 'rw'."""
-        if mode == "r":
-            events = selectors.EVENT_READ
-        elif mode == "w":
-            events = selectors.EVENT_WRITE
-        elif mode == "rw":
-            events = selectors.EVENT_READ | selectors.EVENT_WRITE
-        else:
-            raise ValueError(f"Invalid events mask mode {mode!r}.")
-        self.selector.modify(self.socket, events, data=self)
-
-    def _read(self):
+    def read(self):
         try:
             if (data := self.socket.recv(4096)):
                 self._in_buffer += data
@@ -48,23 +55,17 @@ class MessageHandler:
             # Resource temporarily unavailable (errno EWOULDBLOCK)
             pass
         if self._json_header_len is None:
-            self.process_protoheader()
-        if self._json_header_len is not None:
+            self._process_protoheader()
+        if self._json_header_len:
             if self.json_header is None:
-                self.process_jsonheader()
-        
-    def _json_encode(self, obj, encoding):
-        return json.dumps(obj, ensure_ascii=False).encode(encoding)
+                self._process_json_header()
+            if self.json_header:
+                if self.content is None:
+                    self._process_content()
+                if self.content:
+                    self._decode_content()
 
-    def _json_decode(self, json_bytes, encoding):
-        wrapper = io.TextIOWrapper(
-            io.BytesIO(json_bytes), encoding=encoding, newline=""
-        )
-        decoded_jason = json.load(wrapper)
-        wrapper.close()
-        return decoded_jason
-
-    def process_protoheader(self):
+    def _process_protoheader(self):
         header_length = 2
         if len(self._in_buffer) >= header_length:
             self._json_header_len = struct.unpack(
@@ -72,7 +73,7 @@ class MessageHandler:
             )[0]
             self._in_buffer = self._in_buffer[header_length:]
 
-    def process_jsonheader(self):
+    def _process_json_header(self):
         header_length = self._json_header_len
         if len(self._in_buffer) >= header_length:
             self.json_header = self._json_decode(
@@ -89,28 +90,33 @@ class MessageHandler:
                     raise ValueError(
                         f"Missing required header '{required_header}'.")
 
-    def _create_message(self, content_bytes, content_type, content_encoding):
-        json_header = {
-            "byteorder": sys.byteorder,
-            "content-type": content_type,
-            "content-encoding": content_encoding,
-            "content-length": len(content_bytes),
-        }
-        json_header_bytes = self._json_encode(json_header, "utf-8")
-        message_header = struct.pack(">H", len(json_header_bytes))
-        message = message_header + json_header_bytes + content_bytes
-        return message
+    def _process_content(self):
+        content_len = self.json_header["content-length"]
+        if len(self._in_buffer) >= content_len:
+            self.content = self._in_buffer[:content_len]
+            self._in_buffer = self._in_buffer[content_len:]
+
+    def _decode_content(self):
+        if self.json_header["content-type"] == "text/json":
+            encoding = self.json_header["content-encoding"]
+            self.content = self._json_decode(self.content, encoding)
+            print(f"Received {self.content!r} from {self.addr}")
+        else:
+            # Binary or unknown content-type
+            print(
+                f"Received {self.json_header['content-type']} from {self.addr}"
+            )
+        
+    def _json_decode(self, json_bytes, encoding):
+        wrapper = io.TextIOWrapper(
+            io.BytesIO(json_bytes), encoding=encoding, newline=""
+        )
+        decoded_jason = json.load(wrapper)
+        wrapper.close()
+        return decoded_jason
     
     def close(self):
         print(f"Closing connection to {self.addr}")
-        try:
-            self.selector.unregister(self.socket)
-        except Exception as error:
-            print(
-                f"Error: selector.unregister() exception for "
-                f"{self.addr}: {error!r}"
-            )
-
         try:
             self.socket.close()
         except OSError as error:
@@ -120,21 +126,13 @@ class MessageHandler:
             self.socket = None
 
 
-class ClientMessage(MessageHandler):
+class ClientHandler(MessageHandler):
     def __init__(self, selector, socket, addr, request):
-        super.__init__(selector, socket, addr)
-        self._request_queued: bool = False
+        super().__init__(socket, addr)
+        self.selector: selectors.BaseSelector = selector
         self.request: dict = request
-        self.response: bytes = None
-
-    def write(self):
-        if not self._request_queued:
-            self.queue_request()
-        self._write()
-        if not self._out_buffer:
-            # Set selector to listen for read events, we're done writing.
-            self._set_selector_events_mask("r")
-
+        self._request_queued: bool = False
+   
     def queue_request(self):
         content = self.request["content"]
         content_type = self.request["type"]
@@ -143,47 +141,44 @@ class ClientMessage(MessageHandler):
             content_bytes = self._json_encode(content, content_encoding)
         else:
             content_bytes = content
-        message = self._create_message(
+        self.create_message(
             content_bytes, content_type, content_encoding)
-        self._out_buffer += message
         self._request_queued = True
-        
+
+    def write(self):
+        if not self._request_queued:
+            self.queue_request()
+        super().write()
+        if self.finished_writing:
+            self.selector.modify(self.socket, selectors.EVENT_READ, data=self)
+
     def read(self):
-        self._read()
-        if self.json_header:
-            if self.response is None:
-                self.process_response()
+        super().read()
+        if self.content:
+            # the full message has been read
+            if self.json_header["content-type"] == "text/json":
+                self._act_upon_json()
+            else:
+                self._act_upon_binary()
+            self.close()
+    
+    def _act_upon_json(self):
+        print(f"Got result: {self.content.get('result')}")
 
-    def process_response(self):
-        content_len = self.json_header["content-length"]
-        if not len(self._in_buffer) >= content_len:
-            return
-        data = self._in_buffer[:content_len]
-        self._in_buffer = self._in_buffer[content_len:]
-        if self.json_header["content-type"] == "text/json":
-            encoding = self.json_header["content-encoding"]
-            self.response = self._json_decode(data, encoding)
-            print(f"Received response {self.response!r} from {self.addr}")
-            self._process_response_json_content()
-        else:
-            # Binary or unknown content-type
-            self.response = data
+    def _act_upon_binary(self):
+        print(f"Got response: {self.content!r}")
+
+    def close(self):
+        try:
+            self.selector.unregister(self.socket)
+        except Exception as error:
             print(
-                f"Received {self.json_header['content-type']} "
-                f"response from {self.addr}"
+                f"Error: selector.unregister() exception for "
+                f"{self.addr}: {error!r}"
             )
-            self._process_response_binary_content()
-        # Close when response has been processed
-        self.close()
+        finally:
+            super().close()
 
-    def _process_response_json_content(self):
-        content = self.response
-        result = content.get("result")
-        print(f"Got result: {result}")
-
-    def _process_response_binary_content(self):
-        content = self.response
-        print(f"Got response: {content!r}")
 
 request_search = {
     "morpheus": "Follow the white rabbit. \U0001f430",
@@ -191,61 +186,31 @@ request_search = {
     "\U0001f436": "\U0001f43e Playing ball! \U0001f3d0",
 }
 
-class ServerMessage(MessageHandler):
+class ServerHandler(MessageHandler):
     def __init__(self, selector, socket, addr) -> None:
-        super().__init__(selector, socket, addr)
-        self.request = None
+        super().__init__(socket, addr)
+        self.selector: selectors.BaseSelector = selector
         self.response_created: bool = False
 
     def read(self):
-        self._read()
-        if self.jsonheader:
-            if self.request is None:
-                self.process_request()
-
-    def process_request(self):
-        content_len = self.jsonheader["content-length"]
-        if not len(self._in_buffer) >= content_len:
-            return
-        data = self._in_buffer[:content_len]
-        self._in_buffer = self._in_buffer[content_len:]
-        if self.jsonheader["content-type"] == "text/json":
-            encoding = self.jsonheader["content-encoding"]
-            self.request = self._json_decode(data, encoding)
-            print(f"Received request {self.request!r} from {self.addr}")
-        else:
-            # Binary or unknown content-type
-            self.request = data
-            print(
-                f"Received {self.jsonheader['content-type']} "
-                f"request from {self.addr}"
-            )
-        # Set selector to listen for write events, we're done reading.
-        self._set_selector_events_mask("w")
-
-    def write(self):
-        if self.request:
-            if not self.response_created:
-                self.create_response()
-        self._write()
-        # Close when the buffer is drained. The response has been sent.
-        if self.response_created and not self._out_buffer:
-            self.close()
+        super().read()
+        if self.content:
+            # the full message has been read
+            self.selector.modify(self.socket, selectors.EVENT_WRITE, data=self)
 
     def create_response(self):
-        if self.jsonheader["content-type"] == "text/json":
+        if self.json_header["content-type"] == "text/json":
             response = self._create_response_json_content()
         else:
             # Binary or unknown content-type
             response = self._create_response_binary_content()
-        message = self._create_message(**response)
+        self.create_message(**response)
         self.response_created = True
-        self._out_buffer += message
 
     def _create_response_json_content(self):
-        action = self.request.get("action")
+        action = self.content.get("action")
         if action == "search":
-            query = self.request.get("value")
+            query = self.content.get("value")
             answer = request_search.get(query) or f"No match for '{query}'."
             content = {"result": answer}
         else:
@@ -261,8 +226,28 @@ class ServerMessage(MessageHandler):
     def _create_response_binary_content(self):
         response = {
             "content_bytes": b"First 10 bytes of request: "
-            + self.request[:10],
+            + self.content[:10],
             "content_type": "binary/custom-server-binary-type",
             "content_encoding": "binary",
         }
         return response
+
+    def write(self):
+        if self.content:    #read content
+            if not self.response_created:
+                self.create_response()
+        super().write()
+        if self.response_created:
+            if self.finished_writing:
+                self.close()
+    
+    def close(self):
+        try:
+            self.selector.unregister(self.socket)
+        except Exception as error:
+            print(
+                f"Error: selector.unregister() exception for "
+                f"{self.addr}: {error!r}"
+            )
+        finally:
+            super().close()

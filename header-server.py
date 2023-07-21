@@ -6,7 +6,7 @@ from selectors import EVENT_WRITE as WRITE
 from socket import AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from socket import socket as Socket
 
-from handler_lib import ServerMessage
+from handler_lib import ServerHandler
 
 
 def parse_args() -> Namespace:
@@ -34,11 +34,12 @@ def main(host: str, port: int) -> None:
                 handler = key.data
                 try:
                     if handler is None:
-                        accept_wrapper(key.fileobj)
-                    if actions & WRITE:
-                        handler.write()
-                    if actions & READ:
-                        handler.read()
+                        accept_wrapper(selector, key.fileobj)
+                    else:
+                        if actions & READ:
+                            handler.read()
+                        if actions & WRITE:
+                            handler.write()
                 except (ValueError, TypeError, ConnectionError) as error:
                     log.error(f"Error on {handler.addr}:")
                     log.error(error)
@@ -53,7 +54,7 @@ def accept_wrapper(selector: BaseSelector, socket: Socket) -> None:
     connection, addr = socket.accept()
     connection.setblocking(False)
     log.info(f"Accepting connection from {addr[0]}:{addr[1]}")
-    data = ServerMessage(selector, connection, addr)
+    data = ServerHandler(selector, connection, addr)
     selector.register(connection, READ, data)
 
 
