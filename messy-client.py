@@ -14,7 +14,7 @@ from socket import socket as Socket
 class ConnectionState:
     conn_id: int
     messages: list[bytes]
-    expected_message_length: int
+    expected_echo_length: int
     received_length: int = 0
     out_buffer: bytes = b''
     in_buffer: bytes = b''
@@ -27,7 +27,7 @@ def parse_args() -> Namespace:
     parser.add_argument('--num_conns', type=int, default=3)
     parser.add_argument('--names', action='append', nargs='+',
                         default=['Elimelech\n', 'Etty\n', 'Tippy\n', 
-                                 'Yaakov\n', 'Leah\n'])
+                                 'Yaakov\n', 'Leah\n', 'Noah\n'])
     return parser.parse_args()
 
 
@@ -45,7 +45,7 @@ def main(host:str, port:int, num_conns: int, names: list[str]) -> None:
         data = ConnectionState(
             conn_id=conn_index,
             messages=rand_names,
-            expected_message_length=sum(len(name) for name in rand_names)
+            expected_echo_length=sum(len(name) for name in rand_names)
         )
         selector.register(socket, actions, data)
     try:
@@ -85,7 +85,7 @@ def service_connection(selector: BaseSelector,
             data.received_length += len(recv_data)
             data.in_buffer += recv_data
             log.info(f"Recived data from connection {data.conn_id}")
-    if data.received_length == data.expected_message_length:
+    if data.received_length == data.expected_echo_length:
         log.info(f"Closing connection {data.conn_id}")
         socket.close()
         selector.unregister(socket)
