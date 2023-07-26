@@ -49,8 +49,19 @@ class SocketHandler:
         finally:
             # Delete reference to socket object for garbage collection
             self.socket = None
- 
 
+
+def json_encode(self, obj, encoding):
+        return json.dumps(obj, ensure_ascii=False).encode(encoding)
+    
+def json_decode(json_bytes, encoding):
+    wrapper = io.TextIOWrapper(
+        io.BytesIO(json_bytes), encoding=encoding, newline=""
+    )
+    decoded_jason = json.load(wrapper)
+    wrapper.close()
+    return decoded_jason
+        
 class MessageHandler(SocketHandler):
     def __init__(self, socket, addr) -> None:
         super().__init__(socket, addr)
@@ -65,13 +76,10 @@ class MessageHandler(SocketHandler):
             "content-encoding": content_encoding,
             "content-length": len(content_bytes),
         }
-        json_header_bytes = self._json_encode(json_header, "utf-8")
+        json_header_bytes = json_encode(json_header, "utf-8")
         message_header = struct.pack(">H", len(json_header_bytes))
         message = message_header + json_header_bytes + content_bytes
         self.buffer(message)    
-
-    def _json_encode(self, obj, encoding):
-        return json.dumps(obj, ensure_ascii=False).encode(encoding)
     
     def read(self):
         super().read()
@@ -97,7 +105,7 @@ class MessageHandler(SocketHandler):
     def _process_json_header(self):
         header_length = self._json_header_len
         if len(self.received) >= header_length:
-            self.json_header = self._json_decode(
+            self.json_header = json_decode(
                 self.received[:header_length], "utf-8"
             )
             self.received = self.received[header_length:]
@@ -120,7 +128,7 @@ class MessageHandler(SocketHandler):
     def decode_content(self):
         if self.json_header["content-type"] == "text/json":
             encoding = self.json_header["content-encoding"]
-            self.content = self._json_decode(self.content, encoding)
+            self.content = json_decode(self.content, encoding)
             print(f"Received {self.content!r} from {self.addr}")
         else:
             # Binary or unknown content-type
@@ -128,14 +136,6 @@ class MessageHandler(SocketHandler):
                 f"Received {self.json_header['content-type']} from {self.addr}"
             )
         
-    def _json_decode(self, json_bytes, encoding):
-        wrapper = io.TextIOWrapper(
-            io.BytesIO(json_bytes), encoding=encoding, newline=""
-        )
-        decoded_jason = json.load(wrapper)
-        wrapper.close()
-        return decoded_jason
-
 
 class ClientHandler(MessageHandler):
     def __init__(self, selector, socket, addr, request):
@@ -149,7 +149,7 @@ class ClientHandler(MessageHandler):
         content_type = self.request["type"]
         content_encoding = self.request["encoding"]
         if content_type == "text/json":
-            content_bytes = self._json_encode(content, content_encoding)
+            content_bytes = json_encode(content, content_encoding)
         else:
             content_bytes = content
         self.create_message(
@@ -238,7 +238,7 @@ class ServerHandler(MessageHandler):
             content = {"result": f"Error: invalid action '{action}'."}
         content_encoding = "utf-8"
         response = {
-            "content_bytes": self._json_encode(content, content_encoding),
+            "content_bytes": json_encode(content, content_encoding),
             "content_type": "text/json",
             "content_encoding": content_encoding,
         }
