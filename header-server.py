@@ -1,8 +1,5 @@
-import logging as log
 from argparse import ArgumentParser, Namespace
-from selectors import BaseSelector, DefaultSelector
-from selectors import EVENT_READ as READ
-from selectors import EVENT_WRITE as WRITE
+from selectors import BaseSelector, DefaultSelector, EVENT_READ, EVENT_WRITE
 from socket import AF_INET, SOCK_STREAM, SOL_SOCKET, SO_REUSEADDR
 from socket import socket as Socket
 
@@ -24,8 +21,8 @@ def main(host: str, port: int) -> None:
     listening_socket.bind((host, port))
     listening_socket.listen()
     listening_socket.setblocking(False)
-    log.info(f"Listening on to {host}:{port}")
-    selector.register(listening_socket, READ, data=None)
+    print(f"Listening on to {host}:{port}")
+    selector.register(listening_socket, EVENT_READ, data=None)
     try:
         while True:
             # while there are sockets being monitored
@@ -36,13 +33,12 @@ def main(host: str, port: int) -> None:
                     if handler is None:
                         accept_wrapper(selector, key.fileobj)
                     else:
-                        if actions & READ:
+                        if actions & EVENT_READ:
                             handler.read()
-                        if actions & WRITE:
+                        if actions & EVENT_WRITE:
                             handler.write()
                 except (ValueError, TypeError, ConnectionError) as error:
-                    log.error(f"Error on {handler.addr}:")
-                    log.error(error)
+                    print(f"Error on {handler}:\n{error}")
                     handler.close()
     except KeyboardInterrupt:
         print("\nKeyboard interrupt received, exiting.")
@@ -52,17 +48,11 @@ def main(host: str, port: int) -> None:
 
 def accept_wrapper(selector: BaseSelector, socket: Socket) -> None:
     connection, addr = socket.accept()
-    connection.setblocking(False)
-    log.info(f"Accepting connection from {addr[0]}:{addr[1]}")
-    data = ServerHandler(selector, connection, addr)
-    selector.register(connection, READ, data)
+    label = f"{addr[0]}:{addr[1]}"
+    print(f"Accepting connection from {label}")
+    ServerHandler(selector, connection, label).register()
 
 
-log.basicConfig(
-    format="%(asctime)s.%(msecs)03d: %(message)s", 
-    datefmt="%S",
-    level=log.INFO
-)
 if __name__ == '__main__':
     args = parse_args()
     main(args.host, args.port)

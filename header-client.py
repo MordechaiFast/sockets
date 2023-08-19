@@ -1,8 +1,5 @@
-import logging as log
 from argparse import ArgumentParser, Namespace
-from selectors import DefaultSelector
-from selectors import EVENT_READ as READ
-from selectors import EVENT_WRITE as WRITE
+from selectors import DefaultSelector, EVENT_READ , EVENT_WRITE
 from socket import AF_INET, SOCK_STREAM
 from socket import socket as Socket
 
@@ -20,13 +17,11 @@ def parse_args() -> Namespace:
 def main(host: str, port: int, action: str, value: str) -> None:
     selector = DefaultSelector()
     socket = Socket(AF_INET, SOCK_STREAM)
-    socket.setblocking(False)
     socket.connect_ex((host, port))
-    log.info(f"Starting connection to {host}:{port}")
-    actions = READ | WRITE
+    label = f"{host}:{port}"
+    print(f"Starting connection to {label}")
     request = create_request(action, value)
-    data = ClientHandler(selector, socket, (host, port), request)
-    selector.register(socket, actions, data)
+    ClientHandler(selector, socket, label, request).register()
     try:
         while selector.get_map():
             # while there are sockets being monitored
@@ -34,15 +29,14 @@ def main(host: str, port: int, action: str, value: str) -> None:
             for key, actions in events:
                 handler = key.data
                 try:
-                    if actions & WRITE:
+                    if actions & EVENT_WRITE:
                         handler.write()
-                    if actions & READ:
+                    if actions & EVENT_READ:
                         handler.read()
                 except (ValueError, TypeError, ConnectionError) as error:
-                    log.error(f"Error on {handler.addr}:")
-                    log.error(error)
+                    print(f"Error on {handler}:\n{error}")
                     handler.close()
-        log.info("All connections closed. Exiting.")
+        print("All connections closed. Exiting.")
     except KeyboardInterrupt:
         print("\nKeyboard interrupt received, exiting.")
     finally:
@@ -64,11 +58,6 @@ def create_request(action, value):
         }
 
 
-log.basicConfig(
-    format="%(asctime)s.%(msecs)03d: %(message)s", 
-    datefmt="%S",
-    level=log.INFO
-)
 if __name__ == '__main__':
     args = parse_args()
     main(args.host, args.port, args.action, args.value)
